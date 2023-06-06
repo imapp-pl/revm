@@ -10,11 +10,21 @@ hex = "0.4"
 revm = { path = "../../crates/revm", version = "3.3.0" }
 microbench = "0.5"
 
+[dev-dependencies]
+criterion = "0.5.1"
+
 [[bin]]
 name = "analysis"
+bench = false
 
 [[bin]]
 name = "snailtracer"
+bench = false
 
 [[bin]]
 name = "transfer"
+bench = false
+
+[[bench]]
+name = "criterion_bytecode"
+harness = false
