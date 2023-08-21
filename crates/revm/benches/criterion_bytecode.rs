@@ -52,7 +52,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut dur = Duration::from_nanos(0);
             for _i in 0..iters {
-                let mut interpreter = Interpreter::new(contract.clone(), u64::MAX, false);
+                let mut interpreter = Interpreter::new(Box::new(contract.clone()), u64::MAX, false);
                 let mut host = DummyHost::new(evm.env.clone());
                 let timer = Instant::now();
                 interpreter.run::<_, LatestSpec>(&mut host);
@@ -66,7 +66,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut dur = Duration::from_nanos(0);
             for _i in 0..iters {
-                let mut interpreter = Interpreter::new(stop_contract.clone(), u64::MAX, false);
+                let mut interpreter = Interpreter::new(Box::new(stop_contract.clone()), u64::MAX, false);
                 let mut host = DummyHost::new(evm.env.clone());
                 let timer = Instant::now();
                 interpreter.run::<_, LatestSpec>(&mut host);
