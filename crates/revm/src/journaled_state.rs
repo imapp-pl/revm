@@ -1,18 +1,18 @@
 use crate::interpreter::{inner_models::SelfDestructResult, InstructionResult};
 use crate::primitives::{
-    db::Database, hash_map::Entry, Account, Bytecode, HashMap, Log, State, StorageSlot, B160,
-    KECCAK_EMPTY, U256,
+    db::Database, hash_map::Entry, Account, Bytecode, HashMap, Log, Spec, SpecId::*, State,
+    StorageSlot, TransientStorage, B160, KECCAK_EMPTY, PRECOMPILE3, U256,
 };
-use alloc::{vec, vec::Vec};
-use core::mem::{self};
-use revm_interpreter::primitives::Spec;
-use revm_interpreter::primitives::SpecId::SPURIOUS_DRAGON;
+use alloc::vec::Vec;
+use core::mem;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JournaledState {
     /// Current state.
     pub state: State,
+    /// EIP 1153 transient storage
+    pub transient_storage: TransientStorage,
     /// logs
     pub logs: Vec<Log>,
     /// how deep are we in call stack.
@@ -23,7 +23,7 @@ pub struct JournaledState {
     /// so we need to take care of that difference. Set this to false if you are handling
     /// legacy transactions
     pub is_before_spurious_dragon: bool,
-    /// It is assumed that precompiles start from 0x1 address and spand next N addresses.
+    /// It is assumed that precompiles start from 0x1 address and span next N addresses.
     /// we are using that assumption here
     pub num_of_precompiles: usize,
 }
@@ -59,6 +59,10 @@ pub enum JournalEntry {
     NonceChange {
         address: B160, //geth has nonce value,
     },
+    /// Create account:
+    /// Actions: Mark account as created
+    /// Revert: Unmart account as created and reset nonce to zero.
+    AccountCreated { address: B160 },
     /// It is used to track both storage change and hot load of storage slot. For hot load in regard
     /// to EIP-2929 AccessList had_value will be None
     /// Action: Storage change or hot load
@@ -68,10 +72,18 @@ pub enum JournalEntry {
         key: U256,
         had_value: Option<U256>, //if none, storage slot was cold loaded from db and needs to be removed
     },
+    /// It is used to track an EIP-1153 transient storage change.
+    /// Action: Transient storage changed.
+    /// Revert: Revert to previous value.
+    TransientStorageChange {
+        address: B160,
+        key: U256,
+        had_value: U256,
+    },
     /// Code changed
     /// Action: Account code changed
     /// Revert: Revert to previous bytecode.
-    CodeChange { address: B160, had_code: Bytecode },
+    CodeChange { address: B160 },
 }
 
 /// SubRoutine checkpoint that will help us to go back from this
@@ -84,13 +96,14 @@ impl JournaledState {
     /// Create new JournaledState.
     ///
     /// num_of_precompiles is used to determine how many precompiles are there.
-    /// Assumption is that number of N first addresses are precompiles (exclusing 0x00..00)
+    /// Assumption is that number of N first addresses are precompiles (excluding 0x00..00)
     ///
     /// Note: This function will journal state after Spurious Dragon fork.
     /// And will not take into account if account is not existing or empty.
     pub fn new(num_of_precompiles: usize) -> JournaledState {
         Self {
             state: HashMap::new(),
+            transient_storage: TransientStorage::default(),
             logs: Vec::new(),
             journal: vec![vec![]],
             depth: 0,
@@ -114,7 +127,7 @@ impl JournaledState {
     }
 
     /// Mark account as touched as only touched accounts will be added to state.
-    /// This is expecially important for state clear where touched empty accounts needs to
+    /// This is especially important for state clear where touched empty accounts needs to
     /// be removed from state.
     pub fn touch(&mut self, address: &B160) {
         if let Some(account) = self.state.get_mut(address) {
@@ -157,12 +170,9 @@ impl JournaledState {
         self.journal
             .last_mut()
             .unwrap()
-            .push(JournalEntry::CodeChange {
-                address,
-                had_code: code.clone(),
-            });
+            .push(JournalEntry::CodeChange { address });
 
-        account.info.code_hash = code.hash();
+        account.info.code_hash = code.hash_slow();
         account.info.code = Some(code);
     }
 
@@ -212,7 +222,7 @@ impl JournaledState {
         *to_balance = to_balance
             .checked_add(balance)
             .ok_or(InstructionResult::OverflowPayment)?;
-        // Overflow of U256 balance is not possible to happen on mainnet. We dont bother to return funds from from_acc.
+        // Overflow of U256 balance is not possible to happen on mainnet. We don't bother to return funds from from_acc.
 
         self.journal
             .last_mut()
@@ -230,8 +240,8 @@ impl JournaledState {
     ///
     /// There are few steps done:
     /// 1. Make created account hot loaded (AccessList) and this should
-    ///     be done before subrouting checkpoint is created.
-    /// 2. Check if there is colission of newly created account with existing one.
+    ///     be done before subroutine checkpoint is created.
+    /// 2. Check if there is collision of newly created account with existing one.
     /// 3. Mark created account as created.
     /// 4. Add fund to created account
     /// 5. Increment nonce of created account if SpuriousDragon is active
@@ -260,6 +270,9 @@ impl JournaledState {
 
         // set account status to created.
         account.mark_created();
+
+        // this entry will revert set nonce.
+        last_journal.push(JournalEntry::AccountCreated { address });
         account.info.code = None;
 
         // Set all storages to default value. They need to be present to act as accessed slots in access list.
@@ -284,16 +297,16 @@ impl JournaledState {
 
         // EIP-161: State trie clearing (invariant-preserving alternative)
         if SPEC::enabled(SPURIOUS_DRAGON) {
+            // nonce is going to be reset to zero in AccountCreated journal entry.
             account.info.nonce = 1;
-            last_journal.push(JournalEntry::NonceChange { address });
         }
 
         // Sub balance from caller
         let caller_account = self.state.get_mut(&caller).unwrap();
-        // Balance is already checked in `create_inner`, so it is safe to just substract.
+        // Balance is already checked in `create_inner`, so it is safe to just subtract.
         caller_account.info.balance -= balance;
 
-        // add journal entry of transfered balance
+        // add journal entry of transferred balance
         last_journal.push(JournalEntry::BalanceTransfer {
             from: caller,
             to: address,
@@ -306,7 +319,7 @@ impl JournaledState {
     #[inline(always)]
     pub fn check_account_collision(
         address: B160,
-        account: &mut Account,
+        account: &Account,
         num_of_precompiles: usize,
     ) -> bool {
         // Check collision. Bytecode needs to be empty.
@@ -328,17 +341,13 @@ impl JournaledState {
 
     fn journal_revert(
         state: &mut State,
+        transient_storage: &mut TransientStorage,
         journal_entries: Vec<JournalEntry>,
         is_spurious_dragon_enabled: bool,
     ) {
-        const PRECOMPILE3: B160 =
-            B160([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
         for entry in journal_entries.into_iter().rev() {
             match entry {
                 JournalEntry::AccountLoaded { address } => {
-                    if is_spurious_dragon_enabled && address == PRECOMPILE3 {
-                        continue;
-                    }
                     state.remove(&address);
                 }
                 JournalEntry::AccountTouched { address } => {
@@ -372,7 +381,7 @@ impl JournaledState {
                     }
                 }
                 JournalEntry::BalanceTransfer { from, to, balance } => {
-                    // we dont need to check overflow and underflow when adding sub subtracting the balance.
+                    // we don't need to check overflow and underflow when adding sub subtracting the balance.
                     let from = state.get_mut(&from).unwrap();
                     from.info.balance += balance;
                     let to = state.get_mut(&to).unwrap();
@@ -380,6 +389,11 @@ impl JournaledState {
                 }
                 JournalEntry::NonceChange { address } => {
                     state.get_mut(&address).unwrap().info.nonce -= 1;
+                }
+                JournalEntry::AccountCreated { address } => {
+                    let account = &mut state.get_mut(&address).unwrap();
+                    account.unmark_created();
+                    account.info.nonce = 0;
                 }
                 JournalEntry::StorageChange {
                     address,
@@ -393,10 +407,24 @@ impl JournaledState {
                         storage.remove(&key);
                     }
                 }
-                JournalEntry::CodeChange { address, had_code } => {
+                JournalEntry::TransientStorageChange {
+                    address,
+                    key,
+                    had_value,
+                } => {
+                    let tkey = (address, key);
+                    if had_value == U256::ZERO {
+                        // if previous value is zero, remove it
+                        transient_storage.remove(&tkey);
+                    } else {
+                        // if not zero, reinsert old value to transient storage.
+                        transient_storage.insert(tkey, had_value);
+                    }
+                }
+                JournalEntry::CodeChange { address } => {
                     let acc = state.get_mut(&address).unwrap();
-                    acc.info.code_hash = had_code.hash();
-                    acc.info.code = Some(had_code);
+                    acc.info.code_hash = KECCAK_EMPTY;
+                    acc.info.code = None;
                 }
             }
         }
@@ -419,6 +447,7 @@ impl JournaledState {
     pub fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint) {
         let is_spurious_dragon_enabled = !self.is_before_spurious_dragon;
         let state = &mut self.state;
+        let transient_storage = &mut self.transient_storage;
         self.depth -= 1;
         // iterate over last N journals sets and revert our global state
         let leng = self.journal.len();
@@ -426,7 +455,14 @@ impl JournaledState {
             .iter_mut()
             .rev()
             .take(leng - checkpoint.journal_i)
-            .for_each(|cs| Self::journal_revert(state, mem::take(cs), is_spurious_dragon_enabled));
+            .for_each(|cs| {
+                Self::journal_revert(
+                    state,
+                    transient_storage,
+                    mem::take(cs),
+                    is_spurious_dragon_enabled,
+                )
+            });
 
         self.logs.truncate(checkpoint.log_i);
         self.journal.truncate(checkpoint.journal_i);
@@ -499,26 +535,23 @@ impl JournaledState {
         slots: &[U256],
         db: &mut DB,
     ) -> Result<&mut Account, DB::Error> {
-        match self.state.entry(address) {
-            Entry::Occupied(entry) => {
-                let account = entry.into_mut();
-
-                Ok(account)
-            }
-            Entry::Vacant(vac) => {
-                let mut account = db
-                    .basic(address)?
+        // load or get account.
+        let account = match self.state.entry(address) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(vac) => vac.insert(
+                db.basic(address)?
                     .map(|i| i.into())
-                    .unwrap_or(Account::new_not_existing());
-
-                for slot in slots {
-                    let storage = db.storage(address, *slot)?;
-                    account.storage.insert(*slot, StorageSlot::new(storage));
-                }
-
-                Ok(vac.insert(account))
+                    .unwrap_or(Account::new_not_existing()),
+            ),
+        };
+        // preload storages.
+        for slot in slots {
+            if let Entry::Vacant(entry) = account.storage.entry(*slot) {
+                let storage = db.storage(address, *slot)?;
+                entry.insert(StorageSlot::new(storage));
             }
         }
+        Ok(account)
     }
 
     /// load account into memory. return if it is cold or hot accessed
@@ -594,12 +627,13 @@ impl JournaledState {
         key: U256,
         db: &mut DB,
     ) -> Result<(U256, bool), DB::Error> {
-        let account = self.state.get_mut(&address).unwrap(); // asume acc is hot
-        let is_newly_created = account.is_newly_created();
+        let account = self.state.get_mut(&address).unwrap(); // assume acc is hot
+                                                             // only if account is created in this tx we can assume that storage is empty.
+        let is_newly_created = account.is_created();
         let load = match account.storage.entry(key) {
             Entry::Occupied(occ) => (occ.get().present_value, false),
             Entry::Vacant(vac) => {
-                // if storage was cleared, we dont need to ping db.
+                // if storage was cleared, we don't need to ping db.
                 let value = if is_newly_created {
                     U256::ZERO
                 } else {
@@ -639,9 +673,9 @@ impl JournaledState {
         // if there is no original value in dirty return present value, that is our original.
         let slot = acc.storage.get_mut(&key).unwrap();
 
-        // new value is same as present, we dont need to do anything
+        // new value is same as present, we don't need to do anything
         if present == new {
-            return Ok((slot.original_value, present, new, is_cold));
+            return Ok((slot.previous_or_original_value, present, new, is_cold));
         }
 
         self.journal
@@ -654,7 +688,58 @@ impl JournaledState {
             });
         // insert value into present state.
         slot.present_value = new;
-        Ok((slot.original_value, present, new, is_cold))
+        Ok((slot.previous_or_original_value, present, new, is_cold))
+    }
+
+    /// Read transient storage tied to the account.
+    ///
+    /// EIP-1153: Transient storage opcodes
+    pub fn tload(&mut self, address: B160, key: U256) -> U256 {
+        self.transient_storage
+            .get(&(address, key))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Store transient storage tied to the account.
+    ///
+    /// If values is different add entry to the journal
+    /// so that old state can be reverted if that action is needed.
+    ///
+    /// EIP-1153: Transient storage opcodes
+    pub fn tstore(&mut self, address: B160, key: U256, new: U256) {
+        let had_value = if new == U256::ZERO {
+            // if new values is zero, remove entry from transient storage.
+            // if previous values was some insert it inside journal.
+            // If it is none nothing should be inserted.
+            self.transient_storage.remove(&(address, key))
+        } else {
+            // insert values
+            let previous_value = self
+                .transient_storage
+                .insert((address, key), new)
+                .unwrap_or_default();
+
+            // check if previous value is same
+            if previous_value != new {
+                // if it is different, insert previous values inside journal.
+                Some(previous_value)
+            } else {
+                None
+            }
+        };
+
+        if let Some(had_value) = had_value {
+            // insert in journal only if value was changed.
+            self.journal
+                .last_mut()
+                .unwrap()
+                .push(JournalEntry::TransientStorageChange {
+                    address,
+                    key,
+                    had_value,
+                });
+        }
     }
 
     /// push log into subroutine

@@ -4,7 +4,7 @@ use core::{
     ops::{BitAnd, Not},
 };
 
-/// A sequencial memory. It uses Rust's `Vec` for internal
+/// A sequential memory. It uses Rust's `Vec` for internal
 /// representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -14,7 +14,9 @@ pub struct Memory {
 
 impl Default for Memory {
     fn default() -> Self {
-        Memory::new()
+        Self {
+            data: Vec::with_capacity(4 * 1024), // took it from evmone
+        }
     }
 }
 
@@ -45,18 +47,23 @@ impl Memory {
         &self.data
     }
 
+    /// Consumes the type and returns the full memory.
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
     /// Shrinks the capacity of the data buffer as much as possible.
     pub fn shrink_to_fit(&mut self) {
         self.data.shrink_to_fit()
     }
 
-    /// Resize the memory. asume that we already checked if
+    /// Resize the memory. Assume that we already checked if
     /// we have enought gas to resize this vector and that we made new_size as multiply of 32
     pub fn resize(&mut self, new_size: usize) {
         self.data.resize(new_size, 0);
     }
 
-    /// Get memory region at given offset. Dont check offset and size
+    /// Get memory region at given offset. Don't check offset and size
     #[inline(always)]
     pub fn get_slice(&self, offset: usize, size: usize) -> &[u8] {
         &self.data[offset..offset + size]
@@ -85,11 +92,11 @@ impl Memory {
     }
 
     /// Set memory from data. Our memory offset+len is expected to be correct but we
-    /// are doing bound checks on data/data_offeset/len and zeroing parts that is not copied.
+    /// are doing bound checks on data/data_offset/len and zeroing parts that is not copied.
     #[inline(always)]
     pub fn set_data(&mut self, memory_offset: usize, data_offset: usize, len: usize, data: &[u8]) {
         if data_offset >= data.len() {
-            // nulify all memory slots
+            // nullify all memory slots
             for i in &mut self.data[memory_offset..memory_offset + len] {
                 *i = 0;
             }
@@ -99,11 +106,20 @@ impl Memory {
         let memory_data_end = memory_offset + (data_end - data_offset);
         self.data[memory_offset..memory_data_end].copy_from_slice(&data[data_offset..data_end]);
 
-        // nulify rest of memory slots
+        // nullify rest of memory slots
         // Safety: Memory is assumed to be valid. And it is commented where that assumption is made
         for i in &mut self.data[memory_data_end..memory_offset + len] {
             *i = 0;
         }
+    }
+
+    /// In memory copy given a src, dst, and length
+    ///
+    /// # Safety
+    /// The caller is responsible to check that we resized memory properly.
+    #[inline(always)]
+    pub fn copy(&mut self, dst: usize, src: usize, length: usize) {
+        self.data.copy_within(src..src + length, dst);
     }
 }
 
@@ -116,7 +132,27 @@ pub(crate) fn next_multiple_of_32(x: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Memory;
+
     use super::next_multiple_of_32;
+
+    #[test]
+    fn test_copy() {
+        // Create a sample memory instance
+        let mut memory = Memory::new();
+
+        // Set up initial memory data
+        let data: Vec<u8> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        memory.resize(data.len());
+        memory.set_data(0, 0, data.len(), &data);
+
+        // Perform a copy operation
+        memory.copy(5, 0, 4);
+
+        // Verify the copied data
+        let copied_data = memory.get_slice(5, 4);
+        assert_eq!(copied_data, &[1, 2, 3, 4]);
+    }
 
     #[test]
     fn test_next_multiple_of_32() {

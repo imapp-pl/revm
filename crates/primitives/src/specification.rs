@@ -1,9 +1,10 @@
+#![allow(non_camel_case_types)]
+
 /// SpecId and their activation block
 /// Information was obtained from: https://github.com/ethereum/execution-specs
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, enumn::N)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[allow(non_camel_case_types)]
 pub enum SpecId {
     FRONTIER = 0,         // Frontier	            0
     FRONTIER_THAWING = 1, // Frontier Thawing       200000
@@ -50,6 +51,7 @@ impl From<&str> for SpecId {
             "London" => SpecId::LONDON,
             "Merge" => SpecId::MERGE,
             "Shanghai" => SpecId::SHANGHAI,
+            "Cancun" => SpecId::CANCUN,
             _ => SpecId::LATEST,
         }
     }
@@ -63,15 +65,16 @@ impl SpecId {
 }
 
 pub trait Spec: Sized {
+    const SPEC_ID: SpecId;
+
     #[inline(always)]
     fn enabled(spec_id: SpecId) -> bool {
         Self::SPEC_ID as u8 >= spec_id as u8
     }
-    const SPEC_ID: SpecId;
 }
 
 macro_rules! spec {
-    ($spec_id:tt,$spec_name:tt) => {
+    ($spec_id:tt, $spec_name:tt) => {
         pub struct $spec_name;
 
         impl Spec for $spec_name {
@@ -88,7 +91,7 @@ spec!(HOMESTEAD, HomesteadSpec);
 spec!(TANGERINE, TangerineSpec);
 spec!(SPURIOUS_DRAGON, SpuriousDragonSpec);
 spec!(BYZANTIUM, ByzantiumSpec);
-// CONSTANTINOPLE was overriden with PETERSBURG
+// CONSTANTINOPLE was overridden with PETERSBURG
 spec!(PETERSBURG, PetersburgSpec);
 spec!(ISTANBUL, IstanbulSpec);
 // MUIR_GLACIER no EVM spec change
@@ -97,6 +100,6 @@ spec!(LONDON, LondonSpec);
 // ARROW_GLACIER no EVM spec change
 // GRAY_GLACIER no EVM spec change
 spec!(MERGE, MergeSpec);
-// MERGE_EOF is pending EVM change
 spec!(SHANGHAI, ShanghaiSpec);
+spec!(CANCUN, CancunSpec);
 spec!(LATEST, LatestSpec);

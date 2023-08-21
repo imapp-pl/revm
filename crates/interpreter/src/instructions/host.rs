@@ -1,6 +1,7 @@
 use crate::primitives::{Bytes, Spec, SpecId::*, B160, B256, U256};
 use crate::MAX_INITCODE_SIZE;
 use crate::{
+    alloc::boxed::Box,
     alloc::vec::Vec,
     gas::{self, COLD_ACCOUNT_ACCESS_COST, WARM_STORAGE_READ_COST},
     interpreter::Interpreter,
@@ -179,6 +180,29 @@ pub fn sstore<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     refund!(interpreter, gas::sstore_refund::<SPEC>(original, old, new));
 }
 
+/// Store value to transient storage
+pub fn tstore<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
+    // EIP-1153: Transient storage opcodes
+    check!(interpreter, SPEC::enabled(CANCUN));
+    check_staticcall!(interpreter);
+    gas!(interpreter, gas::WARM_STORAGE_READ_COST);
+
+    pop!(interpreter, index, value);
+
+    host.tstore(interpreter.contract.address, index, value);
+}
+
+/// Load value from transient storage
+pub fn tload<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
+    // EIP-1153: Transient storage opcodes
+    check!(interpreter, SPEC::enabled(CANCUN));
+    gas!(interpreter, gas::WARM_STORAGE_READ_COST);
+
+    pop_top!(interpreter, index);
+
+    *index = host.tload(interpreter.contract.address, *index);
+}
+
 pub fn log<const N: u8>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     check_staticcall!(interpreter);
 
@@ -229,9 +253,10 @@ pub fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Ho
     interpreter.instruction_result = InstructionResult::SelfDestruct;
 }
 
-pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
+pub fn prepare_create_inputs<const IS_CREATE2: bool, SPEC: Spec>(
     interpreter: &mut Interpreter,
     host: &mut dyn Host,
+    create_inputs: &mut Option<Box<CreateInputs>>,
 ) {
     check_staticcall!(interpreter);
     if IS_CREATE2 {
@@ -254,7 +279,14 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
         );
         // EIP-3860: Limit and meter initcode
         if SPEC::enabled(SHANGHAI) {
-            if len > MAX_INITCODE_SIZE {
+            // Limit is set as double of max contract bytecode size
+            let max_initcode_size = host
+                .env()
+                .cfg
+                .limit_contract_code_size
+                .map(|limit| limit.saturating_mul(2))
+                .unwrap_or(MAX_INITCODE_SIZE);
+            if len > max_initcode_size {
                 interpreter.instruction_result = InstructionResult::CreateInitcodeSizeLimit;
                 return;
             }
@@ -282,15 +314,28 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
     }
     gas!(interpreter, gas_limit);
 
-    let mut create_input = CreateInputs {
+    *create_inputs = Some(Box::new(CreateInputs {
         caller: interpreter.contract.address,
         scheme,
         value,
         init_code: code,
         gas_limit,
+    }));
+}
+
+pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    host: &mut dyn Host,
+) {
+    let mut create_input: Option<Box<CreateInputs>> = None;
+    prepare_create_inputs::<IS_CREATE2, SPEC>(interpreter, host, &mut create_input);
+
+    let Some(mut create_input) = create_input else {
+        return;
     };
 
     let (return_reason, address, gas, return_data) = host.create(&mut create_input);
+
     interpreter.return_data_buffer = match return_reason {
         // Save data to return data buffer if the create reverted
         return_revert!() => return_data,
@@ -337,18 +382,14 @@ pub fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host);
 }
 
-pub fn call_inner<SPEC: Spec>(
+fn prepare_call_inputs<SPEC: Spec>(
     interpreter: &mut Interpreter,
     scheme: CallScheme,
     host: &mut dyn Host,
+    result_len: &mut usize,
+    result_offset: &mut usize,
+    result_call_inputs: &mut Option<Box<CallInputs>>,
 ) {
-    match scheme {
-        CallScheme::DelegateCall => check!(interpreter, SPEC::enabled(HOMESTEAD)), // EIP-7: DELEGATECALL
-        CallScheme::StaticCall => check!(interpreter, SPEC::enabled(BYZANTIUM)), // EIP-214: New opcode STATICCALL
-        _ => (),
-    }
-    interpreter.return_data_buffer = Bytes::new();
-
     pop!(interpreter, local_gas_limit);
     pop_address!(interpreter, to);
     let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
@@ -381,14 +422,14 @@ pub fn call_inner<SPEC: Spec>(
         Bytes::new()
     };
 
-    let out_len = as_usize_or_fail!(interpreter, out_len, InstructionResult::InvalidOperandOOG);
-    let out_offset = if out_len != 0 {
+    *result_len = as_usize_or_fail!(interpreter, out_len, InstructionResult::InvalidOperandOOG);
+    *result_offset = if *result_len != 0 {
         let out_offset = as_usize_or_fail!(
             interpreter,
             out_offset,
             InstructionResult::InvalidOperandOOG
         );
-        memory_resize!(interpreter, out_offset, out_len);
+        memory_resize!(interpreter, out_offset, *result_len);
         out_offset
     } else {
         usize::MAX //unrealistic value so we are sure it is not used
@@ -476,16 +517,45 @@ pub fn call_inner<SPEC: Spec>(
     }
     let is_static = matches!(scheme, CallScheme::StaticCall) || interpreter.is_static;
 
-    let mut call_input = CallInputs {
+    *result_call_inputs = Some(Box::new(CallInputs {
         contract: to,
         transfer,
         input,
         gas_limit,
         context,
         is_static,
+    }));
+}
+
+pub fn call_inner<SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    scheme: CallScheme,
+    host: &mut dyn Host,
+) {
+    match scheme {
+        CallScheme::DelegateCall => check!(interpreter, SPEC::enabled(HOMESTEAD)), // EIP-7: DELEGATECALL
+        CallScheme::StaticCall => check!(interpreter, SPEC::enabled(BYZANTIUM)), // EIP-214: New opcode STATICCALL
+        _ => (),
+    }
+    interpreter.return_data_buffer = Bytes::new();
+
+    let mut out_offset: usize = 0;
+    let mut out_len: usize = 0;
+    let mut call_input: Option<Box<CallInputs>> = None;
+    prepare_call_inputs::<SPEC>(
+        interpreter,
+        scheme,
+        host,
+        &mut out_len,
+        &mut out_offset,
+        &mut call_input,
+    );
+
+    let Some(mut call_input) = call_input else {
+        return;
     };
 
-    // Call host to interuct with target contract
+    // Call host to interact with target contract
     let (reason, gas, return_data) = host.call(&mut call_input);
 
     interpreter.return_data_buffer = return_data;
