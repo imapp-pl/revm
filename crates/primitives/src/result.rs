@@ -1,6 +1,7 @@
 use crate::{Log, State, B160};
 use alloc::vec::Vec;
 use bytes::Bytes;
+use core::fmt;
 use ruint::aliases::U256;
 
 pub type EVMResult<DBError> = core::result::Result<ResultAndState, EVMError<DBError>>;
@@ -51,6 +52,28 @@ impl ExecutionResult {
         }
     }
 
+    /// Returns the output data of the execution.
+    ///
+    /// Returns `None` if the execution was halted.
+    pub fn output(&self) -> Option<&Bytes> {
+        match self {
+            Self::Success { output, .. } => Some(output.data()),
+            Self::Revert { output, .. } => Some(output),
+            _ => None,
+        }
+    }
+
+    /// Consumes the type and returns the output data of the execution.
+    ///
+    /// Returns `None` if the execution was halted.
+    pub fn into_output(self) -> Option<Bytes> {
+        match self {
+            Self::Success { output, .. } => Some(output.into_data()),
+            Self::Revert { output, .. } => Some(output),
+            _ => None,
+        }
+    }
+
     /// Consumes the type and returns logs, if execution is not successful, function will return empty vec.
     pub fn into_logs(self) -> Vec<Log> {
         match self {
@@ -87,6 +110,14 @@ impl Output {
             Output::Create(data, _) => data,
         }
     }
+
+    /// Returns the output data of the execution output.
+    pub fn data(&self) -> &Bytes {
+        match self {
+            Output::Call(data) => data,
+            Output::Create(data, _) => data,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -96,6 +127,22 @@ pub enum EVMError<DBError> {
     /// REVM specific and related to environment.
     PrevrandaoNotSet,
     Database(DBError),
+}
+
+#[cfg(feature = "std")]
+impl<DBError> std::error::Error for EVMError<DBError> where Self: fmt::Debug + fmt::Display {}
+
+impl<DBError> fmt::Display for EVMError<DBError>
+where
+    DBError: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EVMError::Transaction(v) => write!(f, "Transaction error: {:?}", v),
+            EVMError::PrevrandaoNotSet => f.write_str("Prevrandao not set"),
+            EVMError::Database(v) => write!(f, "Database error: {}", v),
+        }
+    }
 }
 
 impl<DBError> From<InvalidTransaction> for EVMError<DBError> {
