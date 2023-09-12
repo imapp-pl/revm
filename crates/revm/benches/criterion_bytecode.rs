@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 extern crate alloc;
 
-pub fn criterion_benchmark(c: &mut Criterion) {
+pub fn criterion_benchmark(_c: &mut Criterion) {
     let mut code_input = String::new();
     let stdin = io::stdin();
     match stdin.read_line(&mut code_input){
@@ -48,33 +48,40 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         bytecode: BytecodeLocked::try_from(stop_bytecode).unwrap(),
         ..Default::default()
     };
-    c.bench_function("bytecode-benchmark", |b| {
-        b.iter_custom(|iters| {
-            let mut dur = Duration::from_nanos(0);
-            for _i in 0..iters {
-                let mut interpreter = Interpreter::new(Box::new(contract.clone()), u64::MAX, false);
-                let mut host = DummyHost::new(evm.env.clone());
-                let timer = Instant::now();
-                interpreter.run::<_, LatestSpec>(&mut host);
-                dur += timer.elapsed();
-            }
-            dur
-        })
-    });
 
-    c.bench_function("bytecode-benchmark-stop", |b| {
-        b.iter_custom(|iters| {
-            let mut dur = Duration::from_nanos(0);
-            for _i in 0..iters {
-                let mut interpreter = Interpreter::new(Box::new(stop_contract.clone()), u64::MAX, false);
-                let mut host = DummyHost::new(evm.env.clone());
-                let timer = Instant::now();
-                interpreter.run::<_, LatestSpec>(&mut host);
-                dur += timer.elapsed();
-            }
-            dur
-        })
-    });
+    Criterion::default()
+        .warm_up_time(Duration::from_millis(100))
+        .measurement_time(Duration::from_millis(200))
+        .bench_function("bytecode-benchmark", |b| {
+            b.iter_custom(|iters| {
+                let mut dur = Duration::from_nanos(0);
+                for _i in 0..iters {
+                    let mut interpreter = Interpreter::new(Box::new(contract.clone()), u64::MAX, false);
+                    let mut host = DummyHost::new(evm.env.clone());
+                    let timer = Instant::now();
+                    interpreter.run::<_, LatestSpec>(&mut host);
+                    dur += timer.elapsed();
+                }
+                dur
+            })
+        });
+
+    Criterion::default()
+        .warm_up_time(Duration::from_millis(100))
+        .measurement_time(Duration::from_millis(200))
+        .bench_function("bytecode-benchmark-stop", |b| {
+            b.iter_custom(|iters| {
+                let mut dur = Duration::from_nanos(0);
+                for _i in 0..iters {
+                    let mut interpreter = Interpreter::new(Box::new(stop_contract.clone()), u64::MAX, false);
+                    let mut host = DummyHost::new(evm.env.clone());
+                    let timer = Instant::now();
+                    interpreter.run::<_, LatestSpec>(&mut host);
+                    dur += timer.elapsed();
+                }
+                dur
+            })
+        });
 }
 
 criterion_group!(benches, criterion_benchmark);
