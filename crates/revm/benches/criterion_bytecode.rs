@@ -50,7 +50,7 @@ pub fn criterion_benchmark(_c: &mut Criterion) {
     };
 
     Criterion::default()
-        .warm_up_time(Duration::from_millis(0))
+        .warm_up_time(Duration::from_nanos(1))
         .measurement_time(Duration::from_millis(3))
         .bench_function("bytecode-benchmark", |b| {
             b.iter_custom(|iters| {
@@ -67,7 +67,7 @@ pub fn criterion_benchmark(_c: &mut Criterion) {
         });
 
     Criterion::default()
-        .warm_up_time(Duration::from_millis(0))
+        .warm_up_time(Duration::from_nanos(1))
         .measurement_time(Duration::from_millis(3))
         .bench_function("bytecode-benchmark-stop", |b| {
             b.iter_custom(|iters| {
