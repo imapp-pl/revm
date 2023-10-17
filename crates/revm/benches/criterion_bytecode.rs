@@ -50,8 +50,8 @@ pub fn criterion_benchmark(_c: &mut Criterion) {
     };
 
     let mut group = _c.benchmark_group("bytecode");
-    group.warm_up_time(Duration::from_micros(500));
-    group.measurement_time(Duration::from_micros(500));
+    group.warm_up_time(Duration::from_micros(500000));
+    group.measurement_time(Duration::from_micros(500000));
     group.bench_function("bytecode-benchmark", |b| {
         b.iter_custom(|iters| {
             let mut dur = Duration::from_nanos(0);
