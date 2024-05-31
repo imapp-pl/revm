@@ -72,3 +72,8 @@ path = "../../examples/fork_ref_transact.rs"
 name = "bench"
 path = "benches/bench.rs"
 harness = false
+
+[[bench]]
+name = "criterion_bytecode"
+path = "benches/criterion_bytecode.rs"
+harness = false
